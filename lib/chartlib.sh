@@ -26,6 +26,8 @@ readonly TIMEOUT="${TIMEOUT:-300}"
 readonly LINT_CONF="${LINT_CONF:-/testing/etc/lintconf.yaml}"
 readonly CHART_YAML_SCHEMA="${CHART_YAML_SCHEMA:-/testing/etc/chart_schema.yaml}"
 readonly VALIDATE_MAINTAINERS="${VALIDATE_MAINTAINERS:-true}"
+readonly CHECK_VERSION_INCREMENT="${CHECK_VERSION_INCREMENT:-true}"
+readonly GITHUB_INSTANCE="${GITHUB_INSTANCE:-https://github.com}"
 readonly GCS_PLUGIN_ENABLED="${GCS_PLUGIN_ENABLED:-false}"
 
 # Special handling for arrays
@@ -45,6 +47,8 @@ echo " TIMEOUT=$TIMEOUT"
 echo " LINT_CONF=$LINT_CONF"
 echo " CHART_YAML_SCHEMA=$CHART_YAML_SCHEMA"
 echo " VALIDATE_MAINTAINERS=$VALIDATE_MAINTAINERS"
+echo " GITHUB_INSTANCE=$GITHUB_INSTANCE"
+echo " CHECK_VERSION_INCREMENT=$CHECK_VERSION_INCREMENT"
 echo " GCS_PLUGIN_ENABLED=$GCS_PLUGIN_ENABLED"
 echo '--------------------------------------------------------------------------------'
 echo
@@ -192,7 +196,7 @@ chartlib::validate_maintainers() {
 
     while read -r name; do
         echo "Verifying maintainer '$name'..."
-        if [[ $(curl --silent --output /dev/null --write-out "%{http_code}" --fail --head "https://github.com/$name") -ne 200 ]]; then
+        if [[ $(curl --silent --output /dev/null --write-out "%{http_code}" --fail --head "$GITHUB_INSTANCE/$name") -ne 200 ]]; then
             chartlib::error "'$name' is not a valid GitHub account. Please use a valid Github account to help us communicate with maintainers in PRs/issues."
             return 1
         fi
@@ -228,7 +232,10 @@ chartlib::validate_chart() {
 
     echo "Validating chart '$chart_dir'..."
 
-    chartlib::check_for_version_bump "$chart_dir" || error=true
+    if [[ "$CHECK_VERSION_INCREMENT" == true ]]; then
+        chartlib::check_for_version_bump "$chart_dir" || error=true
+    fi
+
     chartlib::lint_yaml_file "$chart_dir/Chart.yaml" || error=true
     chartlib::lint_yaml_file "$chart_dir/values.yaml" || error=true
     chartlib::validate_chart_yaml "$chart_dir" || error=true
@@ -302,10 +309,29 @@ chartlib::install_chart_with_single_config() {
             helm install "$chart_dir" --name "$release" --namespace "$namespace" --wait --timeout "$TIMEOUT"
         fi
 
+        local error=
+
         # For deployments --wait may not be sufficient because it looks at 'maxUnavailable' which is 0 by default.
-        for deployment in $(kubectl get deployment --namespace "$namespace" --output jsonpath='{.items[*].metadata.name}'); do
+        for deployment in $(kubectl get deployments --namespace "$namespace" --output jsonpath='{.items[*].metadata.name}'); do
             kubectl rollout status "deployment/$deployment" --namespace "$namespace"
+
+            # 'kubectl rollout status' does not return a non-zero exit code when rollouts fail.
+            # We, thus, need to double-check here.
+
+            local jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+
+            for pod in $(chartlib::get_pods_for_deployment "$deployment" "$namespace"); do
+                ready=$(kubectl get pod "$pod" --namespace "$namespace" --output jsonpath="$jsonpath")
+                if [[ "$ready" != "True" ]]; then
+                    chartlib::error "Pod '$pod' did not reach ready state!"
+                    error=true
+                fi
+            done
         done
+
+        if [[ -n "$error" ]]; then
+            return 1
+        fi
 
         echo "Testing chart '$chart_dir' in namespace '$namespace'..."
         helm test "$release" --cleanup --timeout "$TIMEOUT"
@@ -315,6 +341,25 @@ chartlib::install_chart_with_single_config() {
         chartlib::error "Chart installation failed: $chart_dir"
         return 1
     fi
+}
+
+# Returns the pods that are governed by a deployment.
+# Args:
+#   $1 The name of the deployment
+#   $2 The namespace
+chartlib::get_pods_for_deployment() {
+    local deployment="${1?Deployment is required}"
+    local namespace="${2?Namespace is required}"
+
+    local jq_filter='.spec.selector.matchLabels | to_entries | .[] | "\(.key)=\(.value)"'
+
+    local selectors
+    mapfile -t selectors < <(kubectl get deployment "$deployment" --namespace "$namespace" --output=json | jq -r "$jq_filter")
+
+    local selector
+    selector=$(chartlib::join_by , "${selectors[@]}")
+
+    kubectl get pods --selector "$selector" --namespace "$namespace" --output jsonpath='{.items[*].metadata.name}'
 }
 
 # Lints a chart for all custom values files matching '*.values.yaml'
@@ -347,11 +392,14 @@ chartlib::install_chart_with_all_configs() {
     local chart_dir="${1?Chart directory is required}"
     local index=0
 
+    # Generate suffix 10 long and cut release name to 16 long, as in case of long release name
+    # it was causing StatefulSet with long names to create pods
+    # bug https://github.com/kubernetes/kubernetes/issues/64023
     local release
-    release=$(yq -r .name < "$chart_dir/Chart.yaml")
+    release=$(yq -r .name < "$chart_dir/Chart.yaml" | cut -c-16)
 
     local random_suffix
-    random_suffix=$(tr -dc a-z0-9 < /dev/urandom | fold -w 16 | head -n 1)
+    random_suffix=$(tr -dc a-z0-9 < /dev/urandom | fold -w 10 | head -n 1)
 
     local namespace="${BUILD_ID:-"$release"}-$random_suffix"
     local release="$release-$random_suffix"
@@ -359,7 +407,9 @@ chartlib::install_chart_with_all_configs() {
     local has_test_values=
     for values_file in "$chart_dir"/ci/*-values.yaml; do
         has_test_values=true
-        chartlib::install_chart_with_single_config "$chart_dir" "$release-$index" "$namespace-$index" "$values_file"
+        if ! chartlib::install_chart_with_single_config "$chart_dir" "$release-$index" "$namespace-$index" "$values_file"; then
+            return 1
+        fi
         ((index += 1))
     done
 
@@ -482,4 +532,14 @@ chartlib::delete_namespace() {
 #   $1 The error message
 chartlib::error() {
     printf '\e[31mERROR: %s\n\e[39m' "$1" >&2
+}
+
+# Joins strings by a delimiters
+# Args:
+#   $1 The delimiter
+#   $* Additional args to join by the delimiter
+chartlib::join_by() {
+    local IFS="$1"
+    shift
+    echo "$*"
 }

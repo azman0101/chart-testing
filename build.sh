@@ -18,7 +18,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-readonly IMAGE_TAG=v1.0.3
+readonly IMAGE_TAG=v1.0.5
 readonly IMAGE_REPOSITORY="eu.gcr.io/oxalide-lesechos-service/chart-testing"
 readonly SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 
