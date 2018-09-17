@@ -28,6 +28,7 @@ readonly CHART_YAML_SCHEMA="${CHART_YAML_SCHEMA:-/testing/etc/chart_schema.yaml}
 readonly VALIDATE_MAINTAINERS="${VALIDATE_MAINTAINERS:-true}"
 readonly CHECK_VERSION_INCREMENT="${CHECK_VERSION_INCREMENT:-true}"
 readonly GITHUB_INSTANCE="${GITHUB_INSTANCE:-https://github.com}"
+readonly GCS_PLUGIN_ENABLED="${GCS_PLUGIN_ENABLED:-false}"
 
 # Special handling for arrays
 [[ -z "${CHART_DIRS[*]}" ]] && CHART_DIRS=(charts); readonly CHART_DIRS
@@ -48,6 +49,7 @@ echo " CHART_YAML_SCHEMA=$CHART_YAML_SCHEMA"
 echo " VALIDATE_MAINTAINERS=$VALIDATE_MAINTAINERS"
 echo " GITHUB_INSTANCE=$GITHUB_INSTANCE"
 echo " CHECK_VERSION_INCREMENT=$CHECK_VERSION_INCREMENT"
+echo " GCS_PLUGIN_ENABLED=$GCS_PLUGIN_ENABLED"
 echo '--------------------------------------------------------------------------------'
 echo
 
@@ -83,10 +85,21 @@ chartlib::init_helm() {
 
     helm init --client-only
 
+    if [[ "$GCS_PLUGIN_ENABLED" == true ]]; then
+        echo "GCS plugin enable."
+        helm plugin install https://github.com/viglesiasce/helm-gcs.git --version v0.2.0
+    else
+        echo "GCS plugin disable."
+    fi
+
     for repo in "${CHART_REPOS[@]}"; do
         local name="${repo%=*}"
         local url="${repo#*=}"
 
+        if [[ "$GCS_PLUGIN_ENABLED" == true ]]; then
+            helm gcs init "$url"
+        fi
+        
         helm repo add "$name" "$url"
     done
 }

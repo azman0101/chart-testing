@@ -60,5 +60,6 @@ COPY etc /testing/etc/
 COPY lib /testing/lib/
 COPY chart_test.sh /testing/
 
+RUN ln -n /usr/local/bin/bash /bin/bash
 RUN ln -s /testing/chart_test.sh /usr/local/bin/chart_test.sh
 
